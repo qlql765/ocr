@@ -1,34 +1,38 @@
-import time
-import ddddocr
-import uvicorn
-import argparse
-import base64
-import requests
-from fastapi import FastAPI, Form, File, UploadFile
+# encoding=utf-8
 import io
+import json
+import uvicorn
+import ddddocr
+import requests
 from PIL import Image
-
-from pydantic import BaseModel
-
-# 运行  可选参数如下
-# --port 8124 指定端口,默认为8124
-# --ocr 开启ocr模块 默认开启
-# --old 只有ocr模块开启的情况下生效 默认不开启
-# --det 开启目标检测模式
-
-parser = argparse.ArgumentParser(description="使用ddddocr搭建的最简api服务")
-parser.add_argument("-p", "--port", type=int, default=8124)
-args = parser.parse_args()
+from base64 import b64decode
+from fastapi import FastAPI, File, UploadFile, Body
+from fastapi.responses import HTMLResponse, FileResponse
 
 
 class Ocr():
-    ocr = ddddocr.DdddOcr()
-    det = ddddocr.DdddOcr(det=True)
-    slide = ddddocr.DdddOcr(det=False, ocr=False)
+    ocr = ddddocr.DdddOcr(show_ad=False)
+    det = ddddocr.DdddOcr(det=True, show_ad=False)
+    slide = ddddocr.DdddOcr(det=False, ocr=False, show_ad=False)
 
     @staticmethod
-    def code_image(img: bytes):
-        return Ocr.ocr.classification(img)
+    def code_image(img: bytes, comp):
+        retry = 1
+        while retry < 5:
+            result = Ocr.ocr.classification(img)
+            if comp == 'digit':
+                if result.isdigit():
+                    break
+            elif comp == 'alpha':
+                if result.isalpha():
+                    break
+            elif comp == 'alnum':
+                if result.isalnum():
+                    break
+            else:
+                break
+            retry += 1
+        return result
 
     @staticmethod
     def det_image(img: bytes):
@@ -46,16 +50,16 @@ class Ocr():
             return Ocr.slide.slide_match(target_img, background_img)
 
 
-def ocr_img(type, img_bytes, background_img_bytes):
-    if type == 1:
-        return Ocr.code_image(img_bytes)
-    elif type == 2:
+def ocr_img(ocr_type, img_bytes, background_img_bytes, comp='alnum'):
+    if ocr_type == 1:
+        return Ocr.code_image(img_bytes, comp)
+    elif ocr_type == 2:
         return Ocr.det_image(img_bytes)
-    elif type == 3:
-        return Ocr.slide_image(
-            img_bytes, background_img_bytes)
+    elif ocr_type == 3:
+        return Ocr.slide_image(img_bytes, background_img_bytes)
     else:
         return None
+
 
 def ca(img):
     img_byte_array = io.BytesIO()
@@ -63,71 +67,73 @@ def ca(img):
     img_byte_array = img_byte_array.getvalue()
     return img_byte_array
 
+
 app = FastAPI()
 
 
-class Item(BaseModel):
-    type: int = 1  # 1英数 2点选 3滑块
-    img: str
-    backgroundImg: str = None  # 滑块背景
+# 提供 index.html 文件
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    return FileResponse("templates/index.html")
 
 
-@app.post("/ocr")
-async def ocr_image(item: Item):
-    """ 识别Base64编码图片 """
+# 设置网页图标
+@app.get("/favicon.ico")
+async def favicon():
+    return FileResponse("templates/favicon.ico")
+
+
+@app.post("/")
+async def process(data: dict = Body(...)):
+    # 获取验证码及所需headers
+    if 'header' in data:
+        header = data['header']
+    else:
+        header = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.54 Safari/537.36'
+        }
+    if 'url' in data:
+        # 为url则下载并获取cookies
+        cookies = {}
+        url = data['url']
+        try:
+            r = requests.get(url, headers=header, timeout=30)
+            for key, value in r.cookies.items():
+                cookies.update({key: value})
+            imgdata = r.content
+        except:
+            return {'code': 0, 'result': None, 'msg': '访问{}超时'.format(url)}
+    elif 'imgdata' in data:
+        # 为imgdata则base64解码
+        imgdata = data['imgdata']
+        if imgdata.startswith('data'):
+            imgdata = imgdata.split(',', 1)[1]
+        imgdata = b64decode(imgdata)
+    else:
+        # 错误
+        return {'code': 0, 'result': None, 'msg': '没有图片'}
+    # 获取ocr_type。1：ocr，2：点选，3：滑块。
+    if 'ocr_type' in data:
+        ocr_type = data['ocr_type']
+    else:
+        ocr_type = 1
+    # 获取comp参数
+    if 'comp' in data:
+        comp = data['comp']
+        if comp not in ['digit', 'alpha', 'alnum']:
+            comp = 'alnum'
+    else:
+        comp = 'alnum'
     try:
-        type = item.type
-        img_bytes = base64.b64decode(item.img, altchars=None, validate=False)
-        background_img_bytes = bytes()
-        if item.backgroundImg is not None:
-            background_img_bytes = base64.b64decode(
-                item.backgroundImg, altchars=None, validate=False)
-
-        t = time.perf_counter()
-
-        result = ocr_img(type, img_bytes, background_img_bytes)
-        
-
-        return {'code': 1, 'result': result, 'consumeTime': int((time.perf_counter() - t)*1000), 'msg': 'success'}
+        background_imgdata = bytes()
+        result = ocr_img(ocr_type, imgdata, background_imgdata, comp)
+        if not 'url' in data or cookies == {}:
+            return {'code': 1, 'result': result, 'msg': 'success'}
+        else:
+            return {'code': 1, 'cookies': cookies, 'result': result, 'msg': 'success'}
     except Exception as e:
         return {'code': 0, 'result': None, 'msg': str(e).strip()}
-
-
-@app.post("/ocr/file")
-async def ocr_image_file(type: int = Form(1), img: UploadFile = File(None), backgroundImg: UploadFile = File(None)):
-    """ 识别文件上传图片 """
-    try:
-        img_bytes = await img.read()
-        background_img_bytes = bytes()
-        if backgroundImg is not None:
-            background_img_bytes = await backgroundImg.read()
-
-        t = time.perf_counter()
-        result = ocr_img(type, img_bytes, background_img_bytes)
-
-        return {'code': 1, 'result': result, 'consumeTime': int((time.perf_counter() - t)*1000), 'msg': 'success'}
-    except Exception as e:
-        return {'code': 0, 'result': None, 'msg': str(e).strip()}
-
-
-@app.get("/ping")
-def ping():
-    return {'code' : 200, "msg": "gotcha!!"}
-
-
-@app.get("/docr")
-async def read_item(url: str, type: int = 1):
-  try:
-    img = requests.get(url, timeout=5).content
-  except requests.exceptions.Timeout:
-    return "timeout"
-  t = time.perf_counter()
-  code = ocr_img(type, img, bytes())
-  return {'code': 1, 'from': url, 'result': code, 'consumeTime': int((time.perf_counter() - t)*1000), 'msg': 'success'}
-    
-
 
 
 if __name__ == '__main__':
-    uvicorn.run(app='main:app', host="0.0.0.0",
-                port=args.port, reload=False)
+    uvicorn.run(app='main:app', host="0.0.0.0", port=9898, reload=False)
