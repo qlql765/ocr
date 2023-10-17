@@ -1,4 +1,5 @@
 # 基于Python-Flask的ddddocr服务
+2023年10月17日 更新指定验证码长度 "lenth":4
 
 ## 使用方法：
 
@@ -29,3 +30,27 @@
   
 	"msg": "success" //状态：success，成功；failure，失败
   }
+
+  ## 安装方式
+
+git clone https://github.com/qlql765/ocr.git
+
+cd ocr
+
+pip install -r requirements.txt
+
+python3 main.py #前台运行
+
+nohup python3 main.py &   #后台运行
+
+ps aux | grep python   #查看后台运行的python，然后kill命令停止后台运行
+
+## 错误解决
+
+如果出现AttributeError: module 'PIL.Image' has no attribute 'ANTIALIAS'
+
+那么就卸载pillow的10.0.0版本，然后安装9.5.0版本
+
+pip uninstall -y Pillow
+
+pip install Pillow==9.5.0
