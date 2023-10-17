@@ -5,7 +5,7 @@ import uvicorn
 import ddddocr
 import requests
 from PIL import Image
-from base64 import b64decode
+from base64 import b64decode, b64encode
 from fastapi import FastAPI, File, UploadFile, Body
 from fastapi.responses import HTMLResponse, FileResponse
 
@@ -16,21 +16,33 @@ class Ocr():
     slide = ddddocr.DdddOcr(det=False, ocr=False, show_ad=False)
 
     @staticmethod
-    def code_image(img: bytes, comp):
+    def code_image(img: bytes, comp, lenth):
         retry = 1
         while retry < 5:
             result = Ocr.ocr.classification(img)
             if comp == 'digit':
                 if result.isdigit():
-                    break
+                    if lenth != 0:
+                        if len(result) == lenth:
+                            break
+                    else:
+                        break
             elif comp == 'alpha':
                 if result.isalpha():
-                    break
+                    if lenth != 0:
+                        if len(result) == lenth:
+                            break
+                    else:
+                        break
             elif comp == 'alnum':
                 if result.isalnum():
-                    break
+                    if lenth != 0:
+                        if len(result) == lenth:
+                            break
+                    else:
+                        break
             else:
-                break
+                raise ValueError("识别结果格式或位数错误")
             retry += 1
         return result
 
@@ -50,9 +62,9 @@ class Ocr():
             return Ocr.slide.slide_match(target_img, background_img)
 
 
-def ocr_img(ocr_type, img_bytes, background_img_bytes, comp='alnum'):
+def ocr_img(ocr_type, img_bytes, background_img_bytes, comp='alnum', lenth=0):
     if ocr_type == 1:
-        return Ocr.code_image(img_bytes, comp)
+        return Ocr.code_image(img_bytes, comp, lenth)
     elif ocr_type == 2:
         return Ocr.det_image(img_bytes)
     elif ocr_type == 3:
@@ -84,7 +96,7 @@ async def favicon():
 
 
 @app.post("/")
-async def process(data: dict = Body(...)):
+def process(data: dict = Body(...)):
     # 获取验证码及所需headers
     if 'header' in data:
         header = data['header']
@@ -124,13 +136,86 @@ async def process(data: dict = Body(...)):
             comp = 'alnum'
     else:
         comp = 'alnum'
+    # 获取lenth参数
+    if 'lenth' in data:
+        lenth = data['lenth']
+        if not lenth.isdigit():
+            lenth = 0
+        else:
+            lenth = int(lenth)
+    else:
+        lenth = 0
     try:
         background_imgdata = bytes()
-        result = ocr_img(ocr_type, imgdata, background_imgdata, comp)
+        result = ocr_img(ocr_type, imgdata, background_imgdata, comp, lenth)
         if not 'url' in data or cookies == {}:
             return {'code': 1, 'result': result, 'msg': 'success'}
         else:
             return {'code': 1, 'cookies': cookies, 'result': result, 'msg': 'success'}
+    except Exception as e:
+        return {'code': 0, 'result': None, 'msg': str(e).strip()}
+
+@app.post("/rebuildimg")
+def rebuildImg(data: dict = Body(...)):
+    cookies = {}
+    if 'header' in data:
+        header = data['header']
+    else:
+        header = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.54 Safari/537.36'
+        }
+    if 'url' in data:
+        url = data['url']
+        try:
+            r = requests.get(url, headers=header, timeout=30)
+            for key, value in r.cookies.items():
+                cookies.update({key: value})
+            imgdata = r.content
+        except:
+            return {'code': 0, 'result': None, 'msg': '访问{}超时'.format(url)}
+    elif 'imgdata' in data:
+        imgdata = data['imgdata']
+        if imgdata.startswith('data'):
+            imgdata = imgdata.split(',', 1)[1]
+        imgdata = b64decode(imgdata)
+    else:
+        return {'code': 0, 'result': None, 'msg': '没有图片'}
+    if 'offsetsdict' in data:
+        offsetsdict = data['offsetsdict']
+    else:
+        return {'code': 0, 'result': None, 'msg': '缺少offsetsList参数'}
+    if 'whlist' in data:
+        whlist = data['whlist']
+    else:
+        return {'code': 0, 'result': None, 'msg': 'whList'}
+    try:
+        weight, height = whlist
+        imgstream = io.BytesIO(imgdata)
+        imgfile = Image.open(imgstream)
+        newimgfile = Image.new('RGB', (260, 116))
+        if 'upper' in offsetsdict:
+            i = 0
+            for offset in offsetsdict['upper']:
+                offset = (int(offset[0]), int(offset[1]), int(offset[0]) + int(weight), int(offset[1]) + int(height))
+                newoffset = (0 + i, 0)
+                i += int(weight)
+                region = imgfile.crop(offset)
+                newimgfile.paste(region, newoffset)
+        if 'lower' in offsetsdict:
+            i = 0
+            for offset in offsetsdict['lower']:
+                offset = (int(offset[0]), int(offset[1]), int(offset[0]) + int(weight), int(offset[1]) + int(height))
+                newoffset = (0 + i, int(height))
+                i += int(weight)
+                region = imgfile.crop(offset)
+                newimgfile.paste(region, newoffset)
+        imgfile = io.BytesIO()
+        newimgfile.save(imgfile, format="PNG")
+        imgdata = b64encode(imgfile.getvalue()).decode()
+        if not 'url' in data or cookies == {}:
+            return {'code': 1, 'result': imgdata, 'msg': 'success'}
+        else:
+            return {'code': 1, 'cookies': cookies, 'result': imgdata, 'msg': 'success'}
     except Exception as e:
         return {'code': 0, 'result': None, 'msg': str(e).strip()}
 
